@@ -4942,179 +4942,392 @@ function System.auto_spam.stop()
     end
 end
 
-System.autoparry = {}
+task.wait()until game:IsLoaded()
+P=game:GetService("Players")
+R=game:GetService("RunService")
+RS=game:GetService("ReplicatedStorage")
+L=game:GetService("Lighting")
+UI=game:GetService("UserInputService")
+TS=game:GetService("TweenService")
+DB=game:GetService("Debris")
+Stats=game:GetService("Stats")
+pl=P.LocalPlayer
+pg=pl:WaitForChild("PlayerGui")
+pcall(function()local mt=getrawmetatable(game);local old=mt.__namecall;setreadonly(mt,false);mt.__namecall=newcclosure(function(self,...)if getnamecallmethod():lower()=="kick" and self==pl then return end;return old(self,...)end);setreadonly(mt,true)end)
+Alive=workspace:FindFirstChild("Alive")
+Runtime=workspace:FindFirstChild("Runtime")
+local Balls;task.spawn(function()pcall(function()Balls=workspace:WaitForChild("Balls",10)end)end)
+local TrainingBalls;task.spawn(function()pcall(function()TrainingBalls=workspace:WaitForChild("TrainingBalls",10)end)end)
+hasData=false
+revertedRemotes={}
+Parries=0
+Speed_Divisor_Multiplier=1.1
+Infinity=false
+Phantom=false
+Sys={__parried=false,__training_parried=false,__antidot_parried=false,__infinity_active=false,__deathslash_active=false,__tornado_time=tick(),__first_parry_done=false}
+local lf=0
+serverFireCounter=0
+det={__last_warping=tick(),__lerp_radians=0,__curving=tick(),__aerodynamic_time=tick()}
+recentVels={}
+smoothRadians=0
+lastStableTime=tick()
+local Closest_Entity=nil
+local lastClosestCheck=0
 
-local GlobalParryLocks = {}
+function isValidArgs(a)return #a==7 and type(a[2])=="string" and type(a[3])=="number" and typeof(a[4])=="CFrame" and type(a[5])=="table" and type(a[6])=="table" and type(a[7])=="boolean" end
 
-function System.autoparry.start()
-    if System.__properties.__connections.__autoparry then
-        System.__properties.__connections.__autoparry:Disconnect()
-    end
-    
-    System.__properties.__connections.__autoparry = RunService.PreSimulation:Connect(function()
-        -- AnimationSpamMode is now updated by an always-on Heartbeat (see
-        -- animation section), so removed redundant update here.
-        if not System.__properties.__autoparry_enabled or not LocalPlayer.Character or 
-           not LocalPlayer.Character.PrimaryPart then
-            return
-        end
-        
-        local balls = System.ball.get_all()
-        local training_ball = nil
-        if workspace:FindFirstChild("TrainingBalls") then
-            for _, Instance in pairs(workspace.TrainingBalls:GetChildren()) do
-                if Instance:GetAttribute("realBall") then
-                    training_ball = Instance
-                    break
-                end
-            end
-        end
+task.spawn(function()
+	pcall(function()
+		local mt2=getrawmetatable(game)
+		local old2=mt2.__index
+		setreadonly(mt2,false)
+		mt2.__index=newcclosure(function(self,key)
+			if key=="FireServer" and self:IsA("RemoteEvent")then
+				return newcclosure(function(_,...)
+					local a={...}
+					if isValidArgs(a)or self.Name:find("Parry")then
+						revertedRemotes[self]=a
+						hasData=true
+					end
+					return old2(self,key)(self,...)
+				end)
+			end
+			return old2(self,key)
+		end)
+		setreadonly(mt2,true)
+	end)
+end)
 
-        local function processParry(ball, is_training)
-            if not ball then return end
-            
-            local zoomies = ball:FindFirstChild('zoomies')
-            if not zoomies then return end
-            
-            if not GlobalParryLocks[ball] then
-                GlobalParryLocks[ball] = {
-                    ParriedLastBall = false,
-                    lastTarget = nil,
-                    lastFireTick = 0,
-                    CurrentRandomAcc = AccuracyMin,
-                }
-            end
-            local lockData = GlobalParryLocks[ball]
-            local currentTarget = ball:GetAttribute('target')
-            
-            if currentTarget ~= lockData.lastTarget then
-                lockData.ParriedLastBall = false
-                lockData.lastTarget = currentTarget
-                -- Re-roll random accuracy on each new target (per-ball, matches Condemned).
-                -- This is what makes humanizer actually feel "random" - each ball that
-                -- targets you (or retargets) gets a fresh random accuracy value within
-                -- AccuracyMin/AccuracyMax range.
-                if HumanizerEnabled then
-                    local minVal = math.min(AccuracyMin, AccuracyMax)
-                    local maxVal = math.max(AccuracyMin, AccuracyMax)
-                    lockData.CurrentRandomAcc = math.random(minVal, maxVal)
-                else
-                    lockData.CurrentRandomAcc = AccuracyMin
-                end
-            end
-            
-            if lockData.ParriedLastBall then 
-                if (tick() - lockData.lastFireTick) > 1 then
-                    lockData.ParriedLastBall = false
-                else
-                    return 
-                end
-            end
-            
-            local velocity = zoomies.VectorVelocity
-            local distance = (LocalPlayer.Character.PrimaryPart.Position - ball.Position).Magnitude
-            
-            local ping = Stats.Network.ServerStatsItem['Data Ping']:GetValue() / 10
-            local ping_threshold = math.clamp(ping / 10, 5, 17)
-            local speed = velocity.Magnitude
-            
-            local capped_speed_diff = math.max(speed - 9.5, 0)
-            -- Per-ball accuracy: when humanizer is on, lockData.CurrentRandomAcc
-            -- was rolled at ball target change (above). When humanizer is off, it
-            -- equals AccuracyMin which equals the slider value. Either way, this
-            -- replaces the static __divisor_multiplier with a per-ball value so
-            -- the random accuracy actually varies between balls.
-            local currentAcc = lockData.CurrentRandomAcc or AccuracyMin
-            local mappedAcc = 1 + (currentAcc - 1) * (79 / 99)
-            local perBallDivisorMult = 0.75 + (mappedAcc - 1) * (3 / 99)
-            local speed_divisor = (2.4 + capped_speed_diff * 0.002) * perBallDivisorMult
-            local parry_accuracy = ping_threshold + math.max(speed / speed_divisor, 9.5)
-            
-            if not is_training then
-                local curveResult = System.detection.is_curved(ball)
-                
-                if ball:FindFirstChild('AeroDynamicSlashVFX') then
-                    ball.AeroDynamicSlashVFX:Destroy()
-                    System.__properties.__tornado_time = tick()
-                end
-                
-                if Runtime:FindFirstChild('Tornado') then
-                    if (tick() - System.__properties.__tornado_time) < 
-                       (Runtime.Tornado:GetAttribute('TornadoTime') or 1) + 0.314159 then
-                        return
-                    end
-                end
-                
-                -- Any curve (including backwards) = bait. Skip parry entirely.
-                if currentTarget == LocalPlayer.Name and curveResult then
-                    return
-                end
-                
-                if ball:FindFirstChild('ComboCounter') then return end
-                if LocalPlayer.Character.PrimaryPart:FindFirstChild('SingularityCape') then return end
-                if System.__config.__detections.__infinity and System.__properties.__infinity_active then return end
-                if System.__config.__detections.__deathslash and System.__properties.__deathslash_active then return end
-                if System.__config.__detections.__timehole and System.__properties.__timehole_active then return end
-                if System.__config.__detections.__slashesoffury and System.__properties.__slashesoffury_active then return end
-            end
-            
-            if currentTarget == LocalPlayer.Name and distance <= parry_accuracy then
-                if not is_training then
-                    if getgenv().CooldownProtection then
-                        local ParryCD = LocalPlayer.PlayerGui.Hotbar.Block.UIGradient
-                        if ParryCD.Offset.Y < 0.4 then
-                            ReplicatedStorage.Remotes.AbilityButtonPress:Fire()
-                            return
-                        end
-                    end
-                    
-                    if getgenv().AutoAbility then
-                        local AbilityCD = LocalPlayer.PlayerGui.Hotbar.Ability.UIGradient
-                        if AbilityCD.Offset.Y == 0.5 then
-                            if LocalPlayer.Character.Abilities:FindFirstChild("Raging Deflection") and LocalPlayer.Character.Abilities["Raging Deflection"].Enabled or
-                               LocalPlayer.Character.Abilities:FindFirstChild("Rapture") and LocalPlayer.Character.Abilities["Rapture"].Enabled or
-                               LocalPlayer.Character.Abilities:FindFirstChild("Calming Deflection") and LocalPlayer.Character.Abilities["Calming Deflection"].Enabled or
-                               LocalPlayer.Character.Abilities:FindFirstChild("Aerodynamic Slash") and LocalPlayer.Character.Abilities["Aerodynamic Slash"].Enabled or
-                               LocalPlayer.Character.Abilities:FindFirstChild("Fracture") and LocalPlayer.Character.Abilities["Fracture"].Enabled or
-                               LocalPlayer.Character.Abilities:FindFirstChild("Death Slash") and LocalPlayer.Character.Abilities["Death Slash"].Enabled then
-                                
-                                lockData.ParriedLastBall = true
-                                lockData.lastFireTick = tick()
-                                ReplicatedStorage.Remotes.AbilityButtonPress:Fire()
-                                task.wait(2.432)
-                                ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("DeathSlashShootActivation"):FireServer(true)
-                                return
-                            end
-                        end
-                    end
-                end
-                
-                if (tick() - lockData.lastFireTick) >= 0.15 then
-                    lockData.ParriedLastBall = true
-                    lockData.lastFireTick = tick()
-                    System.parry.execute_action()
-                end
-            end
-        end
+task.spawn(function()
+	task.wait(1)
+	pcall(function()
+		local t2
+		for _,v in filtergc("table",{})do
+			local valid=true
+			for i=0,1 do
+				local r=rawget(v,i)
+				if not(typeof(r)=="Instance" and r:IsA("RemoteEvent"))then valid=false;break end
+			end
+			if valid then t2=v;break end
+		end
+		if not t2 then return end
+		local uuids={}
+		for _,v in pairs(t2)do
+			if type(v)=="string" and v:match("%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x")then table.insert(uuids,v)end
+		end
+		local info=rawget(t2,3)
+		if not info then return end
+		local selector=rawget(info,3)
+		local uuid=uuids[selector]
+		local hash=rawget(info,2)
+		if not uuid or not hash then return end
+		local remoteyield=Instance.new("BindableEvent")
+		local waxfs=(game:FindFirstChildWhichIsA("RemoteEvent",true)or Instance.new("RemoteEvent")).FireServer
+		local fs
+		fs=hookfunction(waxfs,function(self,...)
+			if not checkcaller() and self:IsA("RemoteEvent")and select(1,...)==uuid and select(2,...)==hash then
+				hookfunction(waxfs,fs)
+				remoteyield:Fire(self)
+			end
+			return fs(self,...)
+		end)
+		local rf=remoteyield.Event:Wait()
+		hasData=true
+		revertedRemotes[rf]={uuid,hash,0.5,workspace.CurrentCamera.CFrame,{},{workspace.CurrentCamera.ViewportSize.X/2,workspace.CurrentCamera.ViewportSize.Y/2},false}
+	end)
+end)
 
-        for _, ball in pairs(balls) do
-            if System.__triggerbot.__enabled then return end
-            if getgenv().BallVelocityAbove800 then return end
-            processParry(ball, false)
-        end
-
-        if training_ball then
-            processParry(training_ball, true)
-        end
-    end)
+local function riverGetBalls()
+	local t={}
+	local balls=workspace:FindFirstChild("Balls")
+	if not balls then return t end
+	for _,ball in pairs(balls:GetChildren())do if ball:GetAttribute("realBall")then ball.CanCollide=false;table.insert(t,ball)end end
+	return t
 end
 
-function System.autoparry.stop()
-    if System.__properties.__connections.__autoparry then
-        System.__properties.__connections.__autoparry:Disconnect()
-        System.__properties.__connections.__autoparry = nil
-    end
+local function riverGetClosest()
+	local now=tick()
+	if now-lastClosestCheck<0.1 then return Closest_Entity end
+	lastClosestCheck=now
+	local maxD=math.huge
+	local found=nil
+	if not Alive then return nil end
+	for _,e in pairs(Alive:GetChildren())do
+		if e~=pl.Character and e.PrimaryPart then
+			local d=pl:DistanceFromCharacter(e.PrimaryPart.Position)
+			if d<maxD then maxD=d;found=e end
+		end
+	end
+	Closest_Entity=found
+	return found
 end
+
+local function riverGetClosestToCursor()
+	if not pl.Character or not pl.Character:FindFirstChild("HumanoidRootPart")then return nil end
+	local closest=nil
+	local minDot=-math.huge
+	local cam=workspace.CurrentCamera
+	if not Alive then return nil end
+	local ok,ml=pcall(function()return UI:GetMouseLocation()end)
+	if not ok then return nil end
+	local ray=cam:ScreenPointToRay(ml.X,ml.Y)
+	local ptr=CFrame.lookAt(ray.Origin,ray.Origin+ray.Direction)
+	for _,player in pairs(Alive:GetChildren())do
+		if player==pl.Character then continue end
+		if not player:FindFirstChild("HumanoidRootPart")then continue end
+		local dir=(player.HumanoidRootPart.Position-cam.CFrame.Position).Unit
+		local dot=ptr.LookVector:Dot(dir)
+		if dot>minDot then minDot=dot;closest=player end
+	end
+	return closest
+end
+
+local function riverGetCFrame()
+	local cam=workspace.CurrentCamera
+	local root=pl.Character and pl.Character:FindFirstChild("HumanoidRootPart")
+	if not root then return cam.CFrame end
+	local closest=riverGetClosestToCursor()
+	local targetPart=closest and closest:FindFirstChild("HumanoidRootPart")
+	local targetPos=targetPart and targetPart.Position or(root.Position+cam.CFrame.LookVector*100)
+	return CFrame.new(root.Position,targetPos+Vector3.new(0,5,0))
+end
+
+local function doFire()
+	if not pl.Character then return end
+	local cam=workspace.CurrentCamera
+	local ok,mouse=pcall(function()return UI:GetMouseLocation()end)
+	if not ok then return end
+	local vec2={mouse.X,mouse.Y}
+	local eventData={}
+	if Alive then
+		for _,e in pairs(Alive:GetChildren())do if e.PrimaryPart then pcall(function()local sp=cam:WorldToScreenPoint(e.PrimaryPart.Position);eventData[e.Name]=sp end)end end
+	end
+	local cf=riverGetCFrame()
+	if not Sys.__first_parry_done then
+		pcall(function()for _,conn in pairs(getconnections(pl.PlayerGui.Hotbar.Block.Activated))do conn:Fire()end end)
+		Sys.__first_parry_done=true
+		serverFireCounter=serverFireCounter+1
+		return
+	end
+	for rem,args in pairs(revertedRemotes)do
+		local modified={args[1],args[2],args[3],cf,eventData,vec2,args[7]}
+		pcall(function()
+			if rem:IsA("RemoteEvent")then rem:FireServer(table.unpack(modified))
+			elseif rem:IsA("RemoteFunction")then rem:InvokeServer(table.unpack(modified))end
+		end)
+	end
+	serverFireCounter=serverFireCounter+1
+	if Parries<10000 then Parries=Parries+1;task.delay(0.5,function()if Parries>0 then Parries=Parries-1 end end)end
+end
+
+local function isCurvedMixed()
+	local ball=nil
+	if Balls then for _,v in ipairs(Balls:GetChildren())do if v:GetAttribute("realBall")then ball=v;break end end end
+	if not ball then return false end
+	local zoomies=ball:FindFirstChild("zoomies")
+	if not zoomies then return false end
+	local currentVel=zoomies.VectorVelocity
+	table.insert(recentVels,currentVel)
+	if #recentVels>4 then table.remove(recentVels,1)end
+	local speed=currentVel.Magnitude
+	if speed<1 or speed>9000 then return false end
+	local avgVel=currentVel
+	if #recentVels>1 then local sum=Vector3.zero;for _,v in ipairs(recentVels)do sum=sum+v end;avgVel=sum/#recentVels end
+	local ballDir=avgVel.Unit
+	local char=pl.Character
+	if not char or not char.PrimaryPart then return false end
+	local pos=char.PrimaryPart.Position
+	local direction=(pos-ball.Position).Unit
+	local dot=direction:Dot(ballDir)
+	if dot>=0.95 then return false end
+	local pingRaw=Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
+	local pingS=pingRaw/1000
+	local distance=(pos-ball.Position).Magnitude
+	local reachTime=distance/speed-pingS
+	local speedThreshold=math.min(speed/100,45)
+	local ballDistThreshold=15-math.min(distance/1000,15)+speedThreshold
+	if speed>100 and reachTime>pingRaw/10 then ballDistThreshold=math.max(ballDistThreshold-15,15)end
+	if distance<ballDistThreshold*0.85 then return false end
+	local dirDiff=(ballDir-avgVel).Unit
+	local dirSim=direction:Dot(dirDiff)
+	local dotDiff=dot-dirSim
+	local dotThresholdRiver=math.clamp(0.55-(pingS*0.75),-1,0.45)
+	local dotThresholdAllusive=0.5-pingS
+	local dotThreshold=dotThresholdRiver*0.55+dotThresholdAllusive*0.45
+	local visualThresh=0.12
+	if avgVel.Magnitude>150 then visualThresh=visualThresh-0.02 end
+	if dotDiff<math.min(dotThreshold,visualThresh)then lastStableTime=tick();return true end
+	local clampedDot=math.clamp(dot,-1,1)
+	local radiansRiver=math.asin(clampedDot)
+	local radiansAllusive=math.rad(math.asin(clampedDot))
+	local blendedRadians=radiansRiver*0.6+radiansAllusive*0.4
+	det.__lerp_radians=linearPredict(det.__lerp_radians,blendedRadians,0.83)
+	smoothRadians=linearPredict(smoothRadians,radiansAllusive,0.85)
+	if det.__lerp_radians<0.017 then det.__last_warping=tick()end
+	if smoothRadians<0.015 then lastStableTime=tick()end
+	if(tick()-lastStableTime)<0.07 then return true end
+	if(tick()-det.__last_warping)<(reachTime/1.45)then return true end
+	if(tick()-det.__curving)<(reachTime/1.2)then return true end
+	if #recentVels==4 then
+		local iDiff1=(ballDir-recentVels[1].Unit).Unit;local d1=dot-direction:Dot(iDiff1)
+		local iDiff2=(ballDir-recentVels[2].Unit).Unit;local d2=dot-direction:Dot(iDiff2)
+		if d1<visualThresh or d2<visualThresh then return true end
+	end
+	return dot<dotThreshold
+end
+
+local function linearPredict(a,b,t)return a+(b-a)*t end
+
+local function isParryOnCooldown()
+	local result=false
+	pcall(function()
+		local hotbar=pl.PlayerGui:FindFirstChild("Hotbar")
+		if not hotbar then return end
+		local parryGrad=hotbar:FindFirstChild("Block"):FindFirstChildOfClass("UIGradient")
+		if parryGrad and parryGrad.Offset.Y<0.4 then
+			pcall(function()RS.Remotes.AbilityButtonPress:Fire()end)
+			result=true
+			return
+		end
+		local abilityGrad=hotbar:FindFirstChild("Ability"):FindFirstChildOfClass("UIGradient")
+		if abilityGrad and abilityGrad.Offset.Y==0.5 then
+			local abilities=pl.Character and pl.Character:FindFirstChild("Abilities")
+			if abilities then
+				for _,aName in ipairs({"Raging Deflection","Rapture","Calming Deflection","Aerodynamic Slash","Fracture","Death Slash"})do
+					local ab=abilities:FindFirstChild(aName)
+					if ab then local en=ab:FindFirstChild("Enabled");if en and en.Value==true then pcall(function()RS.Remotes.AbilityButtonPress:Fire()end);result=true;return end end
+				end
+			end
+		end
+	end)
+	return result
+end
+
+pcall(function()RS.Remotes.InfinityBall.OnClientEvent:Connect(function(a,b)Infinity=b or false;Sys.__infinity_active=b or false end)end)
+pcall(function()RS.Remotes.ParrySuccess.OnClientEvent:Connect(function()end)end)
+pcall(function()RS.Remotes.ParrySuccessAll.OnClientEvent:Connect(function(_,root)
+	if root and root.Parent and root.Parent~=pl.Character then if not Alive or root.Parent.Parent~=Alive then return end end
+	local ball=nil
+	if Balls then for _,v in ipairs(Balls:GetChildren())do if v:GetAttribute("realBall")then ball=v;break end end end
+	if not ball then return end
+	local zoomies=ball:FindFirstChild("zoomies")
+	if zoomies then
+		local dir=(pl.Character.PrimaryPart.Position-ball.Position).Unit
+		local dot=dir:Dot(zoomies.VectorVelocity.Unit)
+		if dot<0.5 then det.__curving=tick();lastStableTime=tick()end
+	end
+end)end)
+
+if Balls then Balls.ChildAdded:Connect(function()Sys.__parried=false;Sys.__antidot_parried=false end)
+Balls.ChildRemoved:Connect(function()Parries=0;Sys.__parried=false;Sys.__antidot_parried=false;Phantom=false end)end
+S = {AP=true, LAP=false, ID=true, TB=false, CD=false, PD=false, SG=false}
+R.RenderStepped:Connect(function()
+	if not S.AP or not pl.Character or not pl.Character.PrimaryPart then return end
+	
+	local balls=riverGetBalls()
+	local trainingBall=nil
+	if TrainingBalls then
+		for _,v in ipairs(TrainingBalls:GetChildren())do if v:GetAttribute("realBall")then trainingBall=v;break end end
+	end
+	
+	for _,ball in ipairs(balls)do
+		if not ball then continue end
+		local zoomies=ball:FindFirstChild("zoomies")
+		if not zoomies then continue end
+		if Sys.__parried then continue end
+		
+		local ballTarget=ball:GetAttribute("target")
+		local velocity=zoomies.VectorVelocity
+		local distance=(pl.Character.PrimaryPart.Position-ball.Position).Magnitude
+		local ping=Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
+		local pingThreshold=math.clamp(ping/10,5,17)
+		local speed=velocity.Magnitude
+		if speed<=0 then continue end
+		
+		local cappedSpeedDiff=math.min(math.max(speed-9.5,0),650)
+		local speedDivisor=(2.5+cappedSpeedDiff*0.002)*Speed_Divisor_Multiplier
+		local parryAccuracy=pingThreshold+math.max(speed/speedDivisor,9.5)
+		parryAccuracy=parryAccuracy+math.clamp(ping/1000*speed,0,30)
+		if speed>1500 then local m=1+(speed-1500)/1000;parryAccuracy=parryAccuracy*math.clamp(m,1.5,3.5)end
+		
+		local dirToPlayer=(pl.Character.PrimaryPart.Position-ball.Position).Unit
+		local dotToPlayer=dirToPlayer:Dot(velocity.Unit)
+		if ballTarget~=pl.Name and dotToPlayer<0.1 then continue end
+		
+		if ball:FindFirstChild("AeroDynamicSlashVFX")then pcall(function()ball.AeroDynamicSlashVFX:Destroy()end);det.__aerodynamic_time=tick()end
+		
+		if Runtime and Runtime:FindFirstChild("Tornado")then
+			local tornadoTime=(Runtime.Tornado:GetAttribute("TornadoTime")or 1)+0.314159
+			if(tick()-Sys.__tornado_time)<tornadoTime then continue end
+		end
+		
+		if isCurvedMixed()and ballTarget==pl.Name then continue end
+		if ball:FindFirstChild("ComboCounter")then continue end
+		if pl.Character.PrimaryPart:FindFirstChild("SingularityCape")then continue end
+		if S.ID and Sys.__infinity_active then continue end
+		if isParryOnCooldown()then continue end
+		
+		local closestPlayer=riverGetClosest()
+		if closestPlayer and not Sys.__antidot_parried then
+			local playerDist=(pl.Character.PrimaryPart.Position-closestPlayer.PrimaryPart.Position).Magnitude
+			if playerDist<=30 and dotToPlayer>0.75 then
+				if ballTarget==pl.Name and distance<=30 then
+					doFire()
+					Sys.__parried=true
+					Sys.__antidot_parried=true
+				end
+			end
+		end
+		
+		if S.TB and closestPlayer and closestPlayer.Name==ballTarget then
+			local distToClosest=(pl.Character.PrimaryPart.Position-closestPlayer.PrimaryPart.Position).Magnitude
+			if distToClosest<=35 and ballTarget==pl.Name and distance<=parryAccuracy then
+				doFire()
+				Sys.__parried=true
+			end
+		else
+			if ballTarget==pl.Name and distance<=parryAccuracy then
+				if Parries>7 then continue end
+				Parries=Parries+1
+				task.delay(0.5,function()if Parries>0 then Parries=Parries-1 end end)
+				doFire()
+				Sys.__parried=true
+			end
+		end
+		
+		if Sys.__parried then
+			local t0=tick()
+			repeat R.RenderStepped:Wait()until(tick()-t0)>=1 or not Sys.__parried
+			Sys.__parried=false
+			Sys.__antidot_parried=false
+		end
+	end
+	
+	-- Training/Lobby Auto Parry
+	if trainingBall and S.LAP then
+		local tz=trainingBall:FindFirstChild("zoomies")
+		if tz then
+			if not Sys.__training_parried then
+				local bt=trainingBall:GetAttribute("target")
+				local spd=tz.VectorVelocity.Magnitude
+				local dist=pl:DistanceFromCharacter(trainingBall.Position)
+				local ping2=Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
+				local pingT=math.clamp(ping2/10,5,17)
+				local csd=math.min(math.max(spd-9.5,0),650)
+				local spdDiv=(2.5+csd*0.002)*Speed_Divisor_Multiplier
+				local pa=pingT+math.max(spd/spdDiv,9.5)+math.clamp(ping2/1000*spd,0,30)
+				if spd>1500 then local m2=1+(spd-1500)/1000;pa=pa*math.clamp(m2,1.5,3.5)end
+				if bt==pl.Name and dist<=pa then
+					doFire()
+					Sys.__training_parried=true
+					local t0=tick()
+					repeat R.RenderStepped:Wait()until(tick()-t0)>=1 or not Sys.__training_parried
+					Sys.__training_parried=false
+				end
+			end
+		end
+	end
+end)
 
 local function create_mobile_button(name, position_y, color)
     local gui = Instance.new('ScreenGui')
